@@ -1,44 +1,37 @@
 using System;
-using System.Collections.ObjectModel;
-using System.Collections.Generic;
-using System.Data.SQLite;
-using System.Diagnostics;
 using System.IO;
-using System.Threading.Tasks;
 using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
-using Avalonia.Threading; 
-using System.Runtime.InteropServices; 
+using Avalonia.Threading;
+using System.Text.Json;
 
 namespace AvaloniaCDInventory
 {
     public partial class MainWindow : Window
     {
-        // --- Configuration & State ---
-        private const string DB_FILE = "inventory.db";
-        private string _connectionString = $"Data Source={DB_FILE};Version=3;";
-        private string _currentDBPath = ""; 
-        private ObservableCollection<Album> _allAlbums = new ObservableCollection<Album>();
+        // Native barcode scanning variables
+        private StringBuilder _barcodeBuffer = new StringBuilder();
+        private DateTime _lastKeystroke = DateTime.Now;
 
-        private string _wishlistDbConnection = ""; 
-        private ObservableCollection<WishListItem> _wishlistItems = new ObservableCollection<WishListItem>(); 
-
-        // --- Python & Watcher Variables ---
-        private Process? _pythonProcess;
-        private StreamWriter? _pythonInput;
+        // File watcher for hot-reloading the database
         private FileSystemWatcher? _fileWatcher;
 
         public MainWindow()
         {
             InitializeComponent();
+
+            // Build the version and build date labels
             var assembly = System.Reflection.Assembly.GetExecutingAssembly();
             var version = assembly.GetName().Version;
 
             var lblVersion = this.FindControl<TextBlock>("LblVersion");
             var lblBuildDate = this.FindControl<TextBlock>("LblBuildDate");
+
             if (lblVersion != null && version != null)
                 {
                     lblVersion.Text = $"Version: {version.Major}.{version.Minor}.{version.Build}";
@@ -52,15 +45,9 @@ namespace AvaloniaCDInventory
                 {
                     lblBuildDate.Text = $"Build Date: {buildDateAttr.Value}";
                 }
-
-            GridAlbums.ItemsSource = _allAlbums;
-            GridWishList.ItemsSource = _wishlistItems; 
-
-            // Ensure Python shuts down if you close the window
-            this.Closing += (s, e) => {
-                if (_pythonProcess != null && !_pythonProcess.HasExited)
-                    _pythonProcess.Kill();
-            };
+            
+            this.AddHandler(InputElement.KeyDownEvent, Window_PreviewKeyDown, RoutingStrategies.Tunnel);
+            this.AddHandler(InputElement.KeyUpEvent, Window_PreviewKeyUp, RoutingStrategies.Tunnel);
         }
 
         // --- DATABASE LOGIC ---
@@ -84,227 +71,26 @@ namespace AvaloniaCDInventory
             if (files.Count >= 1)
             {
                 string selectedPath = files[0].Path.LocalPath;
-                _currentDBPath = selectedPath;
-                _connectionString = $"Data Source={selectedPath};Version=3;";
-                
                 string dbFolder = Path.GetDirectoryName(selectedPath) ?? "";
                 string wishlistPath = Path.Combine(dbFolder, "wishlist.db");
-                _wishlistDbConnection = $"Data Source={wishlistPath};Version=3;";
-
-                LoadWishlistFromDB(); 
                 
-                LoadDataFromDB();
+                if (DataContext is MainWindowViewModel vm)
+                {
+                    // Pass the verified file paths directly into the ViewModel
+                    vm.InitializeConnections(selectedPath, wishlistPath);
+                    vm.StatusText = $"Connected: {Path.GetFileName(selectedPath)}";
+                }
+
+                // Load main data and wishlist
                 SetupFileWatcher(selectedPath);
-
                 BtnRefresh.IsEnabled = true;
-                BtnScanner.IsEnabled = true;
-                LblStatus.Text = $"Connected: {Path.GetFileName(selectedPath)}";
-                
-                AppendConsole($"DB Connected: {selectedPath}");
             }
-        }
-
-        private string GetCurrentFilter()
-        {
-            if (CmbFilter.SelectedItem is ComboBoxItem cbi)
-                return cbi.Content?.ToString() ?? "All";
-            return "All";
-        }
-
-        private void LoadDataFromDB()
-        {
-            if (TxtSearch == null || CmbFilter == null || LblCount == null) return;
-            try
-            {
-                _allAlbums.Clear(); 
-                string filterCol = GetCurrentFilter();
-                string searchQ = TxtSearch.Text ?? "";
-
-                using (var conn = new SQLiteConnection(_connectionString))
-                {
-                    conn.Open();
-
-                    var allTracks = new Dictionary<string, List<Track>>();
-                    using (var trackCmd = new SQLiteCommand("SELECT UPC, Position, Track_Title, Duration FROM tracks", conn))
-                    using (var trackReader = trackCmd.ExecuteReader())
-                    {
-                        while (trackReader.Read())
-                        {
-                            string upc = trackReader["UPC"]?.ToString() ?? "";
-                            if (!allTracks.ContainsKey(upc))
-                                allTracks[upc] = new List<Track>();
-                                
-                            allTracks[upc].Add(new Track {
-                                Position = trackReader["Position"]?.ToString() ?? "",
-                                TrackTitle = trackReader["Track_Title"]?.ToString() ?? "",
-                                Duration = trackReader["Duration"]?.ToString() ?? ""
-                            });
-                        }
-                    }
-
-                    string sql = "SELECT * FROM albums";
-                    if (!string.IsNullOrEmpty(searchQ))
-                    {
-                        if (filterCol == "All")
-                            sql += " WHERE Artist LIKE @q OR Title LIKE @q OR Genre LIKE @q";
-                        else
-                            sql += $" WHERE {filterCol} LIKE @q";
-                    }
-
-                    using (var cmd = new SQLiteCommand(sql, conn))
-                    {
-                        if (!string.IsNullOrEmpty(searchQ))
-                            cmd.Parameters.AddWithValue("@q", $"%{searchQ}%");
-
-                        using (var r = cmd.ExecuteReader())
-                        {
-                            while (r.Read())
-                            {
-                                string currentUpc = r["UPC"].ToString() ?? "";
-                                var newAlbum = new Album {
-                                    UPC = currentUpc,
-                                    Artist = r["Artist"].ToString() ?? "",
-                                    SortArtist = r["SortArtist"]?.ToString() ?? "",
-                                    Title = r["Title"].ToString() ?? "",
-                                    Year = r["Year"].ToString() ?? "",
-                                    Format = r["Format"].ToString() ?? "",
-                                    Label = r["Label"].ToString() ?? "",
-                                    Genre = r["Genre"]?.ToString() ?? "",
-                                    Styles = r["Styles"]?.ToString() ?? ""
-                                };
-
-                                if (allTracks.ContainsKey(currentUpc))
-                                {
-                                    newAlbum.Tracks = new ObservableCollection<Track>(allTracks[currentUpc]);
-                                }
-
-                                _allAlbums.Add(newAlbum);
-                            }
-                        }
-                    }
-                }
-                LblCount.Text = $"{_allAlbums.Count} Albums";
-            }
-            catch (Exception ex)
-            {
-                AppendConsole($"\nDatabase Error: {ex.Message}");
-            }
-        }
-
-        // --- UI EVENTS (SEARCH & FILTER) ---
-        private void BtnRefresh_Click(object? sender, RoutedEventArgs e) => LoadDataFromDB();
-
-        private void BtnCloseTracklist_Click(object? sender, RoutedEventArgs e)
-        {
-            if (GridAlbums != null)
-            {
-                GridAlbums.SelectedItem = null;
-            }
-        }
-
-        private void ToggleCol_Click(object? sender, RoutedEventArgs e)
-        {
-            if (GridAlbums == null) return;
-            
-            if (sender is CheckBox chk && chk.Tag is string tagStr && int.TryParse(tagStr, out int colIndex))
-            {
-                if (colIndex >= 0 && colIndex < GridAlbums.Columns.Count)
-                {
-                    GridAlbums.Columns[colIndex].IsVisible = chk.IsChecked ?? false;
-                }
-            }
-        }
-        
-        private void CmbFilter_SelectionChanged(object? sender, SelectionChangedEventArgs e) => LoadDataFromDB();
-        
-        private void TxtSearch_TextChanged(object? sender, TextChangedEventArgs e) => LoadDataFromDB();
-
-        // --- PYTHON SCANNER LOGIC ---
-        private void BtnStartScanner_Click(object? sender, RoutedEventArgs e)
-        {
-            string scriptName = "New_Discogs_v2.9.py";
-            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string projectRoot = Path.GetFullPath(Path.Combine(baseDir, @"..\..\.."));
-
-            string pythonPath;
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                pythonPath = Path.Combine(projectRoot, "venv", "Scripts", "python.exe");
-            }
-            else
-            {
-                pythonPath = Path.Combine(projectRoot, "venv", "bin", "python");
-            }
-
-            string scriptPath = Path.Combine(projectRoot, scriptName);
-
-            if (!File.Exists(pythonPath))
-            {
-                 AppendConsole($"ERR: Could not find Python at: {pythonPath}");
-                 return;
-            }
-
-            var psi = new ProcessStartInfo
-            {
-                FileName = pythonPath,
-                Arguments = $"-u \"{scriptPath}\" \"{_currentDBPath}\"", 
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardInput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-                WorkingDirectory = Path.GetDirectoryName(scriptPath)
-            };
-
-            try 
-            {
-                _pythonProcess = new Process { StartInfo = psi };
-                _pythonProcess.OutputDataReceived += (s, args) => AppendConsole(args.Data);
-                _pythonProcess.ErrorDataReceived += (s, args) => AppendConsole("ERR: " + args.Data);
-
-                _pythonProcess.Start();
-                _pythonProcess.BeginOutputReadLine();
-                _pythonProcess.BeginErrorReadLine();
-                _pythonInput = _pythonProcess.StandardInput;
-
-                BtnScanner.IsEnabled = false;
-                BtnScanner.Content = "Scanner Running";
-                TxtScannerInput.Focus();
-            }
-            catch (Exception ex)
-            {
-                AppendConsole($"ERR: Could not start Python: {ex.Message}");
-            }
-        }
-
-        private void TxtScannerInput_KeyDown(object? sender, KeyEventArgs e)
-        {
-            if (e.Key == Key.Enter && _pythonInput != null)
-            {
-                string cmd = TxtScannerInput.Text ?? "";
-                AppendConsole($"> {cmd}");
-                _pythonInput.WriteLine(cmd);
-                _pythonInput.Flush();
-                
-                Dispatcher.UIThread.Post(() => TxtScannerInput.Text = "");
-                e.Handled = true;
-            }
-        }
-
-        private void AppendConsole(string? text)
-        {
-            if (string.IsNullOrEmpty(text)) return;
-            
-            Dispatcher.UIThread.Post(() => {
-                TxtConsole.Text += text + Environment.NewLine;
-                TxtConsole.CaretIndex = TxtConsole.Text.Length; 
-            });
         }
 
         private void SetupFileWatcher(string filePath)
         {
             if (_fileWatcher != null) return;
-            
+
             string folder = Path.GetDirectoryName(filePath)!;
             string file = Path.GetFileName(filePath);
 
@@ -313,53 +99,186 @@ namespace AvaloniaCDInventory
                 NotifyFilter = NotifyFilters.LastWrite,
                 EnableRaisingEvents = true
             };
-            
-            _fileWatcher.Changed += async (s, e) => {
-                await Task.Delay(1000); 
-                Dispatcher.UIThread.Post(() => LoadDataFromDB());
+
+            _fileWatcher.Changed += async (s, e) =>
+            {
+                await Task.Delay(1000);
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (DataContext is MainWindowViewModel vm) vm.LoadMasterLibrary();
+                });
             };
         }
-    
-        private void GridAlbums_CellEditEnded(object? sender, DataGridCellEditEndedEventArgs e)
-        {
-            if (e.EditAction != DataGridEditAction.Commit) return;
 
-            if (e.Row.DataContext is Album album)
+        // --- Pure UI handlers ---
+        private void BtnCloseTracklist_Click(object? sender, RoutedEventArgs e)
+        {
+            if (GridAlbums != null) GridAlbums.SelectedItem = null;
+        }
+
+        private void ToggleCol_Click(object? sender, RoutedEventArgs e)
+        {
+            if (GridAlbums == null) return;
+
+            if (sender is CheckBox chk && chk.Tag is string tagStr && int.TryParse(tagStr, out int colIndex))
+            {
+                if (colIndex >= 0 && colIndex < GridAlbums.Columns.Count)
+                {
+                    GridAlbums.Columns[colIndex].IsVisible = chk.IsChecked ?? false;
+                }
+                
+            }
+        }
+
+        private void BtnRefresh_Click(object? sender, RoutedEventArgs e)
+        {
+            if (DataContext is MainWindowViewModel vm) vm.LoadMasterLibrary();
+        }
+        
+        private void CmbFilter_SelectionChanged(object? sender, SelectionChangedEventArgs e)
+        {
+            if (DataContext is MainWindowViewModel vm && CmbFilter.SelectedItem is ComboBoxItem cbi)
+            {
+                vm.SelectedFilter = cbi.Content?.ToString() ?? "All";
+            }
+        }
+        
+        private void TxtSearch_TextChanged(object? sender, TextChangedEventArgs e)
+        {
+            if (DataContext is MainWindowViewModel vm) vm.SearchQuery = TxtSearch.Text ?? "";
+        }
+    
+        private void BtnSaveWish_Click(object? sender, RoutedEventArgs e)
+        {
+            if (DataContext is MainWindowViewModel vm)
+            {
+                // Assign the UI text box values to ViewModel properties
+                vm.WishArtist = TxtWishArtist.Text ?? "";
+                vm.WishTitle = TxtWishTitle.Text ?? "";
+                vm.WishFormat = (CmbWishFormat.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "CD";
+                vm.WishNotes = TxtWishNotes.Text ?? "";
+
+                // execute the ViewModel command
+                vm.SaveWishCommand.Execute(null);
+
+                // Clear the UI text boxes
+                TxtWishArtist.Text = "";
+                TxtWishTitle.Text = "";
+                CmbWishFormat.SelectedIndex = 0;
+                TxtWishNotes.Text = "";
+            }
+        }
+
+        private async void BtnExportLibrary_Click(object? sender, RoutedEventArgs e)
+        {
+            if (DataContext is not MainWindowViewModel vm || !vm.AllAlbums.Any())
+            {
+                if (DataContext is MainWindowViewModel v) v.StatusText = "No albums to export.";
+                return;
+            }
+
+            // Proceed with export logic here
+            var topLevel = TopLevel.GetTopLevel(this);
+            if (topLevel == null) return;
+
+            var file = await topLevel.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = "Export Master Library",
+                SuggestedFileName = "MasterLibrary.csv",
+                DefaultExtension = "csv",
+                FileTypeChoices = new[]
+                {
+                    new FilePickerFileType("CSV Document") { Patterns = new[] { "*.csv" } },
+                    new FilePickerFileType("JSON Document") { Patterns = new[] { "*.json" } }
+                }
+            });
+
+            if (file != null)
             {
                 try
                 {
-                    using (var conn = new SQLiteConnection(_connectionString))
+                    await using var stream = await file.OpenWriteAsync();
+                    using var writer = new StreamWriter(stream, Encoding.UTF8);
+
+                    if (file.Name.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
                     {
-                        conn.Open();
-                        string sql = @"UPDATE albums 
-                                    SET Artist = @artist, SortArtist = @sortArtist, Title = @title, Year = @year, 
-                                        Format = @format, Label = @label,
-                                        Genre = @genre, Styles = @styles
-                                    WHERE UPC = @upc";
-
-                        using (var cmd = new SQLiteCommand(sql, conn))
+                        var options = new JsonSerializerOptions { WriteIndented = true };
+                        string json = JsonSerializer.Serialize(vm.AllAlbums, options);
+                        await writer.WriteAsync(json);
+                    }
+                    else
+                    {
+                        // CSV Export
+                        await writer.WriteLineAsync("UPC,Artist,SortArtist,Title,Year,Format,Label,Genre,Styles");
+                        foreach (var album in vm.AllAlbums)
                         {
-                            cmd.Parameters.AddWithValue("@artist", album.Artist);
-                            cmd.Parameters.AddWithValue("@sortArtist", album.SortArtist);
-                            cmd.Parameters.AddWithValue("@title", album.Title);
-                            cmd.Parameters.AddWithValue("@year", album.Year);
-                            cmd.Parameters.AddWithValue("@format", album.Format);
-                            cmd.Parameters.AddWithValue("@label", album.Label);
-                            cmd.Parameters.AddWithValue("@genre", album.Genre);
-                            cmd.Parameters.AddWithValue("@styles", album.Styles);
-                            cmd.Parameters.AddWithValue("@upc", album.UPC);
-
-                            cmd.ExecuteNonQuery();
+                            await writer.WriteLineAsync($"\"{EscapeCsv(album.UPC)}\",\"{EscapeCsv(album.Artist)}\",\"{EscapeCsv(album.SortArtist)}\",\"{EscapeCsv(album.Title)}\",\"{EscapeCsv(album.Year)}\",\"{EscapeCsv(album.Format)}\",\"{EscapeCsv(album.Label)}\",\"{EscapeCsv(album.Genre)}\",\"{EscapeCsv(album.Styles)}\"");
                         }
                     }
-                    AppendConsole($"Saved: {album.Title}");
+                    vm.StatusText = $"✅ Exported successfully to {file.Name}";
                 }
                 catch (Exception ex)
                 {
-                    AppendConsole($"ERR: Failed to save edit: {ex.Message}");
-                    LoadDataFromDB(); 
+                    vm.StatusText = $"⚠️ Export Error: {ex.Message}";
                 }
             }
+        }
+
+        private async void BtnExportWishlist_Click(object? sender, RoutedEventArgs e)
+        {
+            if (DataContext is not MainWindowViewModel vm || !vm.WishlistItems.Any())
+            {
+                if (DataContext is MainWindowViewModel v) v.StatusText = "No wishlist data to export.";
+                return;
+            }
+
+            var topLevel = TopLevel.GetTopLevel(this);
+            if (topLevel == null) return;
+
+            var file = await topLevel.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = "Export Wishlist",
+                SuggestedFileName = "WishlistExport.csv",
+                DefaultExtension = "csv",
+                FileTypeChoices = new[] {
+                    new FilePickerFileType("CSV Document") { Patterns = new[] { "*.csv" } }
+                }
+            });
+
+            if (file != null)
+            {
+                try
+                {
+                    await using var stream = await file.OpenWriteAsync();
+                    using var writer = new StreamWriter(stream, Encoding.UTF8);
+
+                    await writer.WriteLineAsync("Artist,Title,Format,Notes,DateAdded");
+                    foreach (var item in vm.WishlistItems)
+                    {
+                        await writer.WriteLineAsync($"\"{EscapeCsv(item.Artist)}\",\"{EscapeCsv(item.Title)}\",\"{EscapeCsv(item.Format)}\",\"{EscapeCsv(item.Notes)}\",\"{EscapeCsv(item.DateAdded)}\"");
+                    }
+                    vm.StatusText = $"✅ Wishlist exported to {file.Name}";
+                }
+                catch (Exception ex)
+                {
+                    vm.StatusText = $"⚠️ Export Error: {ex.Message}";
+                }
+            }
+        }
+
+        private string EscapeCsv(string input)
+        {
+            if (string.IsNullOrEmpty(input)) return "";
+            return input.Replace("\"", "\"\""); // Escape quotes to prevent CSV column breaking
+        }
+
+        private void GridAlbums_CellEditEnded(object? sender, DataGridCellEditEndedEventArgs e)
+        {
+            if (e.EditAction == DataGridEditAction.Commit && e.Row.DataContext is Album album)
+            {
+                if (DataContext is MainWindowViewModel vm) vm.UpdateAlbum(album);
+            }
+
         }
 
         private void GridAlbums_SelectionChanged(object? sender, SelectionChangedEventArgs e) { }
@@ -368,26 +287,7 @@ namespace AvaloniaCDInventory
         {
             if (e.Key == Key.Delete && GridAlbums.SelectedItem is Album selectedAlbum)
             {
-                try 
-                {
-                    using (var conn = new SQLiteConnection(_connectionString))
-                    {
-                        conn.Open();
-                        using (var cmd = new SQLiteCommand("DELETE FROM albums WHERE UPC = @upc", conn))
-                        {
-                            cmd.Parameters.AddWithValue("@upc", selectedAlbum.UPC);
-                            cmd.ExecuteNonQuery();
-                        }
-                    }
-                    
-                    _allAlbums.Remove(selectedAlbum);
-                    LblCount.Text = $"{_allAlbums.Count} Albums";
-                    AppendConsole($"Deleted: {selectedAlbum.Title}");
-                }
-                catch (Exception ex)
-                {
-                    AppendConsole($"ERR: Could not delete: {ex.Message}");
-                }
+                if (DataContext is MainWindowViewModel vm) vm.DeleteAlbum(selectedAlbum);
             }
         }
 
@@ -395,156 +295,70 @@ namespace AvaloniaCDInventory
         {
             if (e.Key == Key.Delete && GridWishList.SelectedItem is WishListItem selectedItem)
             {
-                try
-                {
-                    using (var conn = new SQLiteConnection(_wishlistDbConnection))
-                    {
-                        conn.Open();
-                        using (var cmd = new SQLiteCommand("DELETE FROM wishlist WHERE WishID = @id", conn))
-                        {
-                            cmd.Parameters.AddWithValue("@id", selectedItem.WishID);
-                            cmd.ExecuteNonQuery();
-                        }
-                    }
-                    _wishlistItems.Remove(selectedItem);
-                    AppendConsole($"Deleted target: {selectedItem.Title}");
-                }
-                catch (Exception ex)
-                {
-                    AppendConsole($"ERR deleting wishlist item: {ex.Message}");
-                }
+                if (DataContext is MainWindowViewModel vm) vm.DeleteWishlistItem(selectedItem);
             }
         }       
 
-        private void LoadWishlistFromDB()
+        private async void Window_PreviewKeyDown(object? sender, KeyEventArgs e)
         {
-            if (string.IsNullOrEmpty(_wishlistDbConnection)) return;
-
-            try
+            // Increased buffer to 250ms to accommodate varying USB scanner speeds
+            if ((DateTime.Now - _lastKeystroke).TotalMilliseconds > 250)
             {
-                _wishlistItems.Clear();
-
-                using (var conn = new SQLiteConnection(_wishlistDbConnection))
-                {
-                    conn.Open();
-                    
-                    string createSql = @"CREATE TABLE IF NOT EXISTS wishlist (
-                                            WishID INTEGER PRIMARY KEY AUTOINCREMENT,
-                                            Artist TEXT,
-                                            Title TEXT NOT NULL,
-                                            Format TEXT,
-                                            Notes TEXT,
-                                            DateAdded TEXT
-                                        )";
-                    using (var createCmd = new SQLiteCommand(createSql, conn)) { createCmd.ExecuteNonQuery(); }
-
-                    using (var cmd = new SQLiteCommand("SELECT * FROM wishlist ORDER BY DateAdded DESC", conn))
-                    using (var reader = cmd.ExecuteReader())
-                    {
-                        while (reader.Read())
-                        {
-                            _wishlistItems.Add(new WishListItem
-                            {
-                                WishID = Convert.ToInt32(reader["WishID"]),
-                                Artist = reader["Artist"]?.ToString() ?? "",
-                                Title = reader["Title"]?.ToString() ?? "",
-                                Format = reader["Format"]?.ToString() ?? "",
-                                Notes = reader["Notes"]?.ToString() ?? "",
-                                DateAdded = reader["DateAdded"]?.ToString() ?? ""
-                            });
-                        }
-                    }
-                }
+                _barcodeBuffer.Clear();
             }
-            catch (Exception ex)
+            
+            _lastKeystroke = DateTime.Now;
+
+            // Catch both Enter and Return depending on how the OS maps the scanner's termination key
+            if ((e.Key == Key.Enter || e.Key == Key.Return) && _barcodeBuffer.Length > 0)
             {
-                AppendConsole($"ERR loading wishlist: {ex.Message}");
+                string scannedCode = _barcodeBuffer.ToString();
+                _barcodeBuffer.Clear();
+
+                if (DataContext is MainWindowViewModel vm)
+                {
+                    await vm.ProcessBarcodeAsync(scannedCode);
+                }
+
+                // Stop the event from reaching other controls
+                e.Handled = true;
+                return;
+            }
+
+            // Map the top-row number and numpad keys into the buffer
+            if (e.Key >= Key.D0 && e.Key <= Key.D9)
+            {
+                _barcodeBuffer.Append((char)('0' + (e.Key - Key.D0)));
+            }
+            else if (e.Key >= Key.NumPad0 && e.Key <= Key.NumPad9)
+            {
+                _barcodeBuffer.Append((char)('0' + (e.Key - Key.NumPad0)));
             }
         }
 
-        private void BtnSaveWish_Click(object? sender, RoutedEventArgs e)
+        private void Window_PreviewKeyUp(object? sender, KeyEventArgs e)
         {
-            if (string.IsNullOrEmpty(_wishlistDbConnection))
-                {
-                    AppendConsole("Wishlist Error: You must click 'Connect DB' on the Master Library tab first.");
-                    return;
-                }
-
-                if (string.IsNullOrWhiteSpace(TxtWishTitle.Text))
-                {
-                    AppendConsole("Wishlist Error: The 'Title' box cannot be empty.");
-                    return;
-                }
-            try
+            // If the scanner just fired an Enter key, swallow the KeyUp event 
+            // so the DataGrid doesn't expand the selected row.
+            if (e.Key == Key.Enter || e.Key == Key.Return)
             {
-                using (var conn = new SQLiteConnection(_wishlistDbConnection))
+                // If it has been less than 500ms since our last barcode buffer reset, 
+                // this was a scanner input, not a human pressing Enter.
+                if ((DateTime.Now - _lastKeystroke).TotalMilliseconds < 500)
                 {
-                    conn.Open();
-                    string sql = @"INSERT INTO wishlist (Artist, Title, Format, Notes, DateAdded) 
-                                   VALUES (@artist, @title, @format, @notes, @dateAdded)";
-                    
-                    using (var cmd = new SQLiteCommand(sql, conn))
-                    {
-                        cmd.Parameters.AddWithValue("@artist", TxtWishArtist.Text ?? "");
-                        cmd.Parameters.AddWithValue("@title", TxtWishTitle.Text);
-                        
-                        string formatVal = (CmbWishFormat.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "";
-                        cmd.Parameters.AddWithValue("@format", formatVal);
-                        
-                        cmd.Parameters.AddWithValue("@notes", TxtWishNotes.Text ?? "");
-                        cmd.Parameters.AddWithValue("@dateAdded", DateTime.Now.ToString("yyyy-MM-dd"));
-                        
-                        cmd.ExecuteNonQuery();
-                    }
+                    e.Handled = true;
                 }
-
-                TxtWishArtist.Text = "";
-                TxtWishTitle.Text = "";
-                TxtWishNotes.Text = "";
-                CmbWishFormat.SelectedIndex = 0;
-
-                AppendConsole("Target added to Wish List.");
-                LoadWishlistFromDB(); 
-            }
-            catch (Exception ex)
-            {
-                AppendConsole($"ERR saving to wishlist: {ex.Message}");
             }
         }
 
+        private void BtnCloseAbout_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+        {
+            // Close the 'About' box
+            var tabControl = this.FindControl<Avalonia.Controls.TabControl>("MainTabControl");
+            if (tabControl != null)
+            {
+                tabControl.SelectedIndex = 0; // Switch back to the main library tab
+            }
+        }
     } 
-
-    // ====================================================================
-    // DATA MODELS
-    // ====================================================================
-    public class Track
-    {
-        public string TrackTitle { get; set; } = "";
-        public string Duration { get; set; } = "";
-        public string Position { get; set; } = "";
-    }
-
-    public class Album 
-    {
-        public string UPC { get; set; } = "";
-        public string Artist { get; set; } = "";
-        public string SortArtist { get; set; } = "";
-        public string Title { get; set; } = "";
-        public string Year { get; set; } = "";
-        public string Format { get; set; } = "";
-        public string Label { get; set; } = "";
-        public string Genre { get; set; } = "";
-        public string Styles { get; set; } = "";
-        public ObservableCollection<Track> Tracks { get; set; } = new ObservableCollection<Track>();        
-    }
-
-    public class WishListItem
-    {
-        public int WishID { get; set; }
-        public string Artist { get; set; } = "";
-        public string Title { get; set; } = "";
-        public string Format { get; set; } = "";
-        public string Notes { get; set; } = "";
-        public string DateAdded { get; set; } = "";
-    }
 }
