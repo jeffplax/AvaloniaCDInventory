@@ -1,4 +1,4 @@
-# 💿 CD Inventory Manager (Desktop version)
+# 💿 CD Inventory Manager (Desktop and Mobile Android version)
 
 A cross-platform, local-first inventory and wishlist management system designed specifically for large classical music collections. Built with .NET, Avalonia UI, and SQLite, this project features a dual-application architecture (Windows Desktop & Android Mobile) synchronized via a sidecar database model over OneDrive.
 
@@ -17,7 +17,7 @@ Because Android strictly sandboxes application data, synchronization is handled 
 * **Master Library Dashboard:** Filter, sort, and search your entire collection instantly.
 * **Dynamic DataGrid:** Toggleable columns, inline editing, and row-details views for complete tracklists.
 * **Wishlist Management:** Direct database manipulation for adding and removing targets.
-* **Python Scanner Integration:** Built-in console and process runner to execute `New_Discogs_v2.9.py`, injecting new CD metadata and Semantic Knowledge Graph data directly into the database.
+~~* **Python Scanner Integration:** Built-in console and process runner to execute `New_Discogs_v2.9.py`, injecting new CD metadata and Semantic Knowledge Graph data directly into the database.~~ (removed in V2.0. This feature is now integrated within the C# code.)
 
 ### Mobile Application (Android)
 * **Optimized UI:** Touch-friendly layout built specifically for modern Android devices.
@@ -30,13 +30,13 @@ Because Android strictly sandboxes application data, synchronization is handled 
 * **Framework:** .NET 10
 * **UI:** Avalonia UI (Desktop) / .NET Android (Mobile)
 * **Database:** SQLite (`Microsoft.Data.Sqlite` & `System.Data.SQLite`)
-* **Metadata/Scanner:** Python (via `subprocess` execution)
+* **Metadata/Scanner:** ~~Python (via `subprocess` execution)~~ C#
 
 ## 🚀 Getting Started
 
 ### Prerequisites
 * [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
-* Python 3.x (for the Discogs scanner)
+~~* Python 3.x (for the Discogs scanner)~~
 * Android SDK (if compiling the mobile application)
 
 ### Running the Desktop App
