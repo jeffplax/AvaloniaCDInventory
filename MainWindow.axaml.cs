@@ -15,11 +15,10 @@ namespace AvaloniaCDInventory
     public partial class MainWindow : Window
     {
         // Native barcode scanning variables
+        private const int MinBarcodeLength = 8; // EAN-8 is the shortest retail barcode; shorter digit runs are typing
         private StringBuilder _barcodeBuffer = new StringBuilder();
         private DateTime _lastKeystroke = DateTime.Now;
-
-        // File watcher for hot-reloading the database
-        private FileSystemWatcher? _fileWatcher;
+        private bool _swallowNextEnterKeyUp;
 
         public MainWindow()
         {
@@ -81,33 +80,8 @@ namespace AvaloniaCDInventory
                     vm.StatusText = $"Connected: {Path.GetFileName(selectedPath)}";
                 }
 
-                // Load main data and wishlist
-                SetupFileWatcher(selectedPath);
                 BtnRefresh.IsEnabled = true;
             }
-        }
-
-        private void SetupFileWatcher(string filePath)
-        {
-            if (_fileWatcher != null) return;
-
-            string folder = Path.GetDirectoryName(filePath)!;
-            string file = Path.GetFileName(filePath);
-
-            _fileWatcher = new FileSystemWatcher(folder, file)
-            {
-                NotifyFilter = NotifyFilters.LastWrite,
-                EnableRaisingEvents = true
-            };
-
-            _fileWatcher.Changed += async (s, e) =>
-            {
-                await Task.Delay(1000);
-                Dispatcher.UIThread.Post(() =>
-                {
-                    if (DataContext is MainWindowViewModel vm) vm.LoadMasterLibrary();
-                });
-            };
         }
 
         // --- Pure UI handlers ---
@@ -132,41 +106,18 @@ namespace AvaloniaCDInventory
 
         private void BtnRefresh_Click(object? sender, RoutedEventArgs e)
         {
-            if (DataContext is MainWindowViewModel vm) vm.LoadMasterLibrary();
-        }
-        
-        private void CmbFilter_SelectionChanged(object? sender, SelectionChangedEventArgs e)
-        {
-            if (DataContext is MainWindowViewModel vm && CmbFilter.SelectedItem is ComboBoxItem cbi)
-            {
-                vm.SelectedFilter = cbi.Content?.ToString() ?? "All";
-            }
-        }
-        
-        private void TxtSearch_TextChanged(object? sender, TextChangedEventArgs e)
-        {
-            if (DataContext is MainWindowViewModel vm) vm.SearchQuery = TxtSearch.Text ?? "";
-        }
-    
-        private void BtnSaveWish_Click(object? sender, RoutedEventArgs e)
-        {
             if (DataContext is MainWindowViewModel vm)
             {
-                // Assign the UI text box values to ViewModel properties
-                vm.WishArtist = TxtWishArtist.Text ?? "";
-                vm.WishTitle = TxtWishTitle.Text ?? "";
-                vm.WishFormat = (CmbWishFormat.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "CD";
-                vm.WishNotes = TxtWishNotes.Text ?? "";
-
-                // execute the ViewModel command
-                vm.SaveWishCommand.Execute(null);
-
-                // Clear the UI text boxes
-                TxtWishArtist.Text = "";
-                TxtWishTitle.Text = "";
-                CmbWishFormat.SelectedIndex = 0;
-                TxtWishNotes.Text = "";
+                vm.LoadMasterLibrary();
+                vm.LoadWishlist();
             }
+        }
+
+        private void MainTabControl_SelectionChanged(object? sender, SelectionChangedEventArgs e)
+        {
+            // The phone may have synced new targets into wishlist.db (via OneDrive) since we last looked
+            if (e.Source == MainTabControl && MainTabControl.SelectedItem == TabWishList && DataContext is MainWindowViewModel vm)
+                vm.LoadWishlist();
         }
 
         private async void BtnExportLibrary_Click(object? sender, RoutedEventArgs e)
@@ -281,7 +232,12 @@ namespace AvaloniaCDInventory
 
         }
 
-        private void GridAlbums_SelectionChanged(object? sender, SelectionChangedEventArgs e) { }
+        private void GridAlbums_SelectionChanged(object? sender, SelectionChangedEventArgs e)
+        {
+            // Keep the selected CD on screen (e.g. a newly scanned CD, or the one being edited after a refresh)
+            if (GridAlbums.SelectedItem is Album album)
+                Dispatcher.UIThread.Post(() => GridAlbums.ScrollIntoView(album, null), DispatcherPriority.Background);
+        }
 
         private void GridAlbums_KeyDown(object? sender, KeyEventArgs e)
         {
@@ -309,19 +265,23 @@ namespace AvaloniaCDInventory
             
             _lastKeystroke = DateTime.Now;
 
-            // Catch both Enter and Return depending on how the OS maps the scanner's termination key
-            if ((e.Key == Key.Enter || e.Key == Key.Return) && _barcodeBuffer.Length > 0)
+            // Catch both Enter and Return depending on how the OS maps the scanner's termination key.
+            // Short digit runs (e.g. typing a Year into a cell) are left alone so Enter still commits the edit.
+            if ((e.Key == Key.Enter || e.Key == Key.Return) && _barcodeBuffer.Length >= MinBarcodeLength)
             {
                 string scannedCode = _barcodeBuffer.ToString();
                 _barcodeBuffer.Clear();
+
+                // Stop the Enter from reaching other controls. This must happen before the await: the event
+                // finishes routing as soon as we yield, and an unhandled Enter makes the DataGrid select its
+                // first row and open that CD's tracklist.
+                e.Handled = true;
+                _swallowNextEnterKeyUp = true;
 
                 if (DataContext is MainWindowViewModel vm)
                 {
                     await vm.ProcessBarcodeAsync(scannedCode);
                 }
-
-                // Stop the event from reaching other controls
-                e.Handled = true;
                 return;
             }
 
@@ -338,16 +298,11 @@ namespace AvaloniaCDInventory
 
         private void Window_PreviewKeyUp(object? sender, KeyEventArgs e)
         {
-            // If the scanner just fired an Enter key, swallow the KeyUp event 
-            // so the DataGrid doesn't expand the selected row.
-            if (e.Key == Key.Enter || e.Key == Key.Return)
+            // Swallow the KeyUp that matches a scanner's Enter, so it can't act on the grid either
+            if ((e.Key == Key.Enter || e.Key == Key.Return) && _swallowNextEnterKeyUp)
             {
-                // If it has been less than 500ms since our last barcode buffer reset, 
-                // this was a scanner input, not a human pressing Enter.
-                if ((DateTime.Now - _lastKeystroke).TotalMilliseconds < 500)
-                {
-                    e.Handled = true;
-                }
+                _swallowNextEnterKeyUp = false;
+                e.Handled = true;
             }
         }
 

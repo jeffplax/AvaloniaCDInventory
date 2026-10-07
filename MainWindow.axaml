@@ -10,7 +10,7 @@
         Width="1200" Height="800"
         WindowStartupLocation="CenterScreen">
 
-    <TabControl Name="MainTabControl" SelectedIndex="0">
+    <TabControl Name="MainTabControl" SelectedIndex="0" SelectionChanged="MainTabControl_SelectionChanged">
         <TabItem Header="🎵 Master Library">
             <DockPanel LastChildFill="True">
 
@@ -23,17 +23,17 @@
                         <Button Command="{Binding SearchManualEntryCommand}" Content="🔍 Search" Background="#0078D7" Foreground="White" Margin="5,0,0,0" VerticalAlignment="Center"/>
                         <TextBlock Text="Filter:" VerticalAlignment="Center" Margin="10,0,0,0"/>
 
-                        <ComboBox Name="CmbFilter" SelectedIndex="0" SelectionChanged="CmbFilter_SelectionChanged" Width="100">
-                            <ComboBoxItem>All</ComboBoxItem>
-                            <ComboBoxItem>Artist</ComboBoxItem>
-                            <ComboBoxItem>Title</ComboBoxItem>
-                            <ComboBoxItem>Year</ComboBoxItem>
-                            <ComboBoxItem>Format</ComboBoxItem>
-                            <ComboBoxItem>Label</ComboBoxItem>
-                            <ComboBoxItem>Genre</ComboBoxItem>
+                        <ComboBox Name="CmbFilter" SelectedItem="{Binding SelectedFilter}" Width="100">
+                            <x:String>All</x:String>
+                            <x:String>Artist</x:String>
+                            <x:String>Title</x:String>
+                            <x:String>Year</x:String>
+                            <x:String>Format</x:String>
+                            <x:String>Label</x:String>
+                            <x:String>Genre</x:String>
                         </ComboBox>
 
-                        <TextBox Name="TxtSearch" Width="200" Watermark="Search..." TextChanged="TxtSearch_TextChanged"/>
+                        <TextBox Name="TxtSearch" Width="200" Watermark="Search..." Text="{Binding SearchQuery}"/>
 
                         <Button Content="⚙️ Columns" Background="#444444" Foreground="White">
                             <Button.Flyout>
@@ -60,7 +60,7 @@
                     </StackPanel>
                 </Border>
 
-                <DataGrid Name="GridAlbums" ItemsSource="{Binding AllAlbums}" AutoGenerateColumns="False" IsReadOnly="False" 
+                <DataGrid Name="GridAlbums" ItemsSource="{Binding AllAlbums}" SelectedItem="{Binding SelectedAlbum}" AutoGenerateColumns="False" IsReadOnly="False" 
                         GridLinesVisibility="All" BorderThickness="1" BorderBrush="Gray"
                         CellEditEnded="GridAlbums_CellEditEnded" SelectionChanged="GridAlbums_SelectionChanged"
                         KeyDown="GridAlbums_KeyDown"
@@ -105,23 +105,23 @@
                 </DataGrid>
             </DockPanel>
         </TabItem>
-        <TabItem Header="🛒 Wish List">
+        <TabItem Name="TabWishList" Header="🛒 Wish List">
             <Grid RowDefinitions="Auto,*">
                 
                 <Border Grid.Row="0" Background="#252525" Padding="10" Margin="0,0,0,10">
                     <StackPanel Orientation="Horizontal" Spacing="10">
                         <Button Name="BtnExportWishlist" Content="⬇️ Export CSV" Background="#217346" Foreground="White" Click="BtnExportWishlist_Click"/>
                         <TextBlock Text="New Target:" VerticalAlignment="Center" FontWeight="Bold" Foreground="#0078D7"/>
-                        <TextBox Name="TxtWishArtist" Watermark="Artist" Width="200"/>
-                        <TextBox Name="TxtWishTitle" Watermark="Title" Width="250"/>
-                        <ComboBox Name="CmbWishFormat" SelectedIndex="0" Width="100">
-                            <ComboBoxItem>CD</ComboBoxItem>
-                            <ComboBoxItem>Vinyl</ComboBoxItem>
-                            <ComboBoxItem>Box Set</ComboBoxItem>
-                            <ComboBoxItem>Digital</ComboBoxItem>
+                        <TextBox Text="{Binding WishArtist}" Watermark="Artist" Width="200"/>
+                        <TextBox Text="{Binding WishTitle}" Watermark="Title" Width="250"/>
+                        <ComboBox SelectedItem="{Binding WishFormat}" Width="100">
+                            <x:String>CD</x:String>
+                            <x:String>Vinyl</x:String>
+                            <x:String>Box Set</x:String>
+                            <x:String>Digital</x:String>
                         </ComboBox>
-                        <TextBox Name="TxtWishNotes" Watermark="Notes" Width="200"/>
-                        <Button Name="BtnSaveWish" Content="💾 Save" Background="#0078D7" Foreground="White" Click="BtnSaveWish_Click"/>
+                        <TextBox Text="{Binding WishNotes}" Watermark="Notes" Width="200"/>
+                        <Button Command="{Binding SaveWishCommand}" Content="💾 Save" Background="#0078D7" Foreground="White"/>
                     </StackPanel>
                 </Border>
 

@@ -9,7 +9,7 @@ The system relies on a local SQLite database architecture, intentionally bypassi
 * **`inventory.db`**: The master library containing the full schema of albums, tracklists, and metadata.
 * **`wishlist.db`**: A lightweight "sidecar" database handling targets and record-store hunting lists.
 
-Because Android strictly sandboxes application data, synchronization is handled via manual imports/exports from a synced OneDrive vault, allowing offline access when browsing physical record stores.
+Because Android strictly sandboxes application data, the phone keeps its own copies of both files for offline access when browsing physical record stores. `inventory.db` is copied down to the phone (read-only there). `wishlist.db` is **merged** both ways: the phone's *Sync with OneDrive* button picks the shared file and merges it row by row (newest change to each Artist + Title wins, and deletes carry over), so targets added or removed on either device are kept.
 
 ## ✨ Features
 
@@ -37,6 +37,7 @@ Because Android strictly sandboxes application data, synchronization is handled 
 ### Prerequisites
 * [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 * ~~Python 3.x (for the Discogs scanner)~~
+* A [Discogs personal access token](https://www.discogs.com/settings/developers), saved in `%APPDATA%\AvaloniaCDInventory\discogs_token.txt` (or set the `DISCOGS_TOKEN` environment variable)
 * Android SDK (if compiling the mobile application)
 
 ### Running the Desktop App

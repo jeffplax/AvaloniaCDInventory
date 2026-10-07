@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
@@ -9,99 +10,105 @@ namespace AvaloniaCDInventory;
 
 public class DiscogsService
 {
-    private const string ApiToken = "RBLNSEvUdUaulinZxiwGnYXnAdCrMlUMNDyJLkvm";
     private const string UserAgent = "MyCDScanner/TriMode/1.0";
-    
+
+    // The personal access token is kept out of source control. It is read from the DISCOGS_TOKEN
+    // environment variable, or from %APPDATA%\AvaloniaCDInventory\discogs_token.txt.
+    public static readonly string TokenFilePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AvaloniaCDInventory", "discogs_token.txt");
+
     private readonly HttpClient _httpClient;
+    private readonly string? _apiToken;
 
     public DiscogsService()
     {
+        _apiToken = LoadToken();
         _httpClient = new HttpClient();
         _httpClient.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", UserAgent);
-        _httpClient.DefaultRequestHeaders.Add("Authorization", $"Discogs token={ApiToken}");
+        if (_apiToken != null)
+            _httpClient.DefaultRequestHeaders.Add("Authorization", $"Discogs token={_apiToken}");
     }
 
-    public async Task<Album?> SearchAlbumByBarcodeAsync(string upc)
+    private static string? LoadToken()
     {
-        return await FetchAndMapReleaseAsync($"barcode={upc}", upc);
+        string? token = Environment.GetEnvironmentVariable("DISCOGS_TOKEN");
+        if (string.IsNullOrWhiteSpace(token) && File.Exists(TokenFilePath))
+            token = File.ReadAllText(TokenFilePath);
+        return string.IsNullOrWhiteSpace(token) ? null : token.Trim();
     }
 
-    public async Task<Album?> SearchAlbumByCatalogIdAsync(string catId)
-    {
-        return await FetchAndMapReleaseAsync($"catno={catId}", catId);
-    }
+    public Task<Album?> SearchAlbumByBarcodeAsync(string upc) => FetchAndMapReleaseAsync("barcode", upc);
 
-    private async Task<Album?> FetchAndMapReleaseAsync(string queryParam, string databaseId)
+    public Task<Album?> SearchAlbumByCatalogIdAsync(string catId) => FetchAndMapReleaseAsync("catno", catId);
+
+    // Returns null when Discogs has no match; network/auth/rate-limit failures throw so the caller can report them
+    private async Task<Album?> FetchAndMapReleaseAsync(string searchField, string databaseId)
     {
-        try
+        if (_apiToken == null)
+            throw new InvalidOperationException($"No Discogs token found. Put your token in {TokenFilePath}");
+
+        string searchUrl = $"https://api.discogs.com/database/search?{searchField}={Uri.EscapeDataString(databaseId)}&type=release";
+        var searchResponse = await _httpClient.GetStringAsync(searchUrl);
+        using var searchDoc = JsonDocument.Parse(searchResponse);
+        
+        var results = searchDoc.RootElement.GetProperty("results");
+        if (results.GetArrayLength() == 0) return null; 
+
+        int releaseId = results[0].GetProperty("id").GetInt32();
+        string releaseUrl = $"https://api.discogs.com/releases/{releaseId}";
+        var releaseResponse = await _httpClient.GetStringAsync(releaseUrl);
+        using var releaseDoc = JsonDocument.Parse(releaseResponse);
+        var root = releaseDoc.RootElement;
+
+        // Map ID to the UPC property to satisfy the SQLite database structure
+        var album = new Album
         {
-            string searchUrl = $"https://api.discogs.com/database/search?{queryParam}&type=release";
-            var searchResponse = await _httpClient.GetStringAsync(searchUrl);
-            using var searchDoc = JsonDocument.Parse(searchResponse);
-            
-            var results = searchDoc.RootElement.GetProperty("results");
-            if (results.GetArrayLength() == 0) return null; 
+            UPC = databaseId,
+            Title = root.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "",
+            Year = root.TryGetProperty("year", out var y) ? y.GetInt32().ToString() : ""
+        };
 
-            int releaseId = results[0].GetProperty("id").GetInt32();
-            string releaseUrl = $"https://api.discogs.com/releases/{releaseId}";
-            var releaseResponse = await _httpClient.GetStringAsync(releaseUrl);
-            using var releaseDoc = JsonDocument.Parse(releaseResponse);
-            var root = releaseDoc.RootElement;
+        if (root.TryGetProperty("artists", out var artists) && artists.GetArrayLength() > 0)
+        {
+            album.Artist = artists[0].GetProperty("name").GetString() ?? "";
+            album.SortArtist = GenerateSortArtist(album.Artist);
+        }
 
-            // Map ID to the UPC property to satisfy the SQLite database structure
-            var album = new Album
+        if (root.TryGetProperty("formats", out var formats) && formats.GetArrayLength() > 0)
+        {
+            album.Format = formats[0].GetProperty("name").GetString() ?? "Unknown";
+        }
+
+        if (root.TryGetProperty("labels", out var labels) && labels.GetArrayLength() > 0)
+        {
+            album.Label = labels[0].GetProperty("name").GetString() ?? "Unknown";
+        }
+
+        if (root.TryGetProperty("genres", out var genres))
+        {
+            album.Genre = string.Join(", ", genres.EnumerateArray().Select(g => g.GetString()));
+        }
+
+        if (root.TryGetProperty("styles", out var styles))
+        {
+            album.Styles = string.Join(", ", styles.EnumerateArray().Select(s => s.GetString()));
+        }
+
+        if (root.TryGetProperty("tracklist", out var tracklist))
+        {
+            foreach (var trackElement in tracklist.EnumerateArray())
             {
-                UPC = databaseId,
-                Title = root.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "",
-                Year = root.TryGetProperty("year", out var y) ? y.GetInt32().ToString() : ""
-            };
-
-            if (root.TryGetProperty("artists", out var artists) && artists.GetArrayLength() > 0)
-            {
-                album.Artist = artists[0].GetProperty("name").GetString() ?? "";
-                album.SortArtist = GenerateSortArtist(album.Artist);
-            }
-
-            if (root.TryGetProperty("formats", out var formats) && formats.GetArrayLength() > 0)
-            {
-                album.Format = formats[0].GetProperty("name").GetString() ?? "Unknown";
-            }
-
-            if (root.TryGetProperty("labels", out var labels) && labels.GetArrayLength() > 0)
-            {
-                album.Label = labels[0].GetProperty("name").GetString() ?? "Unknown";
-            }
-
-            if (root.TryGetProperty("genres", out var genres))
-            {
-                album.Genre = string.Join(", ", genres.EnumerateArray().Select(g => g.GetString()));
-            }
-
-            if (root.TryGetProperty("styles", out var styles))
-            {
-                album.Styles = string.Join(", ", styles.EnumerateArray().Select(s => s.GetString()));
-            }
-
-            if (root.TryGetProperty("tracklist", out var tracklist))
-            {
-                foreach (var trackElement in tracklist.EnumerateArray())
+                var track = new Track
                 {
-                    var track = new Track
-                    {
-                        Position = trackElement.TryGetProperty("position", out var pos) ? pos.GetString() ?? "" : "",
-                        TrackTitle = trackElement.TryGetProperty("title", out var title) ? title.GetString() ?? "" : "",
-                        Duration = trackElement.TryGetProperty("duration", out var dur) ? dur.GetString() ?? "" : ""
-                    };
-                    album.Tracks.Add(track);
-                }
+                    Position = trackElement.TryGetProperty("position", out var pos) ? pos.GetString() ?? "" : "",
+                    TrackTitle = trackElement.TryGetProperty("title", out var title) ? title.GetString() ?? "" : "",
+                    Duration = trackElement.TryGetProperty("duration", out var dur) ? dur.GetString() ?? "" : ""
+                };
+                album.Tracks.Add(track);
             }
+        }
 
-            return album;
-        }
-        catch (Exception)
-        {
-            return null;
-        }
+        return album;
     }
 
     private string GenerateSortArtist(string artistName)
