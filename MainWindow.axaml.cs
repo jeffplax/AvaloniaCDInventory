@@ -14,10 +14,15 @@ namespace AvaloniaCDInventory
 {
     public partial class MainWindow : Window
     {
-        // Native barcode scanning variables
-        private const int MinBarcodeLength = 8; // EAN-8 is the shortest retail barcode; shorter digit runs are typing
-        private StringBuilder _barcodeBuffer = new StringBuilder();
-        private DateTime _lastKeystroke = DateTime.Now;
+        // Native barcode scanning
+        // A USB scanner "types" the barcode digits very quickly and ends with Enter. Typed digits are held back
+        // instead of going straight to the focused control; if Enter arrives while enough digits are held, it was
+        // a scan. If the digits stop without an Enter (i.e. a person typing), they are released to the control.
+        private const int MinBarcodeLength = 8;  // EAN-8 is the shortest retail barcode; shorter digit runs are typing
+        private const int ScanGapMs = 250;       // max gap between a scanner's keystrokes (tuned for slower USB scanners)
+        private readonly StringBuilder _heldDigits = new StringBuilder();
+        private readonly DispatcherTimer _releaseTimer;
+        private bool _replayingDigits;
         private bool _swallowNextEnterKeyUp;
 
         public MainWindow()
@@ -45,8 +50,12 @@ namespace AvaloniaCDInventory
                     lblBuildDate.Text = $"Build Date: {buildDateAttr.Value}";
                 }
             
+            _releaseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(ScanGapMs) };
+            _releaseTimer.Tick += (_, _) => ReleaseHeldDigits();
+
             this.AddHandler(InputElement.KeyDownEvent, Window_PreviewKeyDown, RoutingStrategies.Tunnel);
             this.AddHandler(InputElement.KeyUpEvent, Window_PreviewKeyUp, RoutingStrategies.Tunnel);
+            this.AddHandler(InputElement.TextInputEvent, Window_PreviewTextInput, RoutingStrategies.Tunnel);
         }
 
         // --- DATABASE LOGIC ---
@@ -239,11 +248,22 @@ namespace AvaloniaCDInventory
                 Dispatcher.UIThread.Post(() => GridAlbums.ScrollIntoView(album, null), DispatcherPriority.Background);
         }
 
-        private void GridAlbums_KeyDown(object? sender, KeyEventArgs e)
+        private async void GridAlbums_KeyDown(object? sender, KeyEventArgs e)
         {
-            if (e.Key == Key.Delete && GridAlbums.SelectedItem is Album selectedAlbum)
+            if (e.Key == Key.Delete && GridAlbums.SelectedItem is Album selectedAlbum && DataContext is MainWindowViewModel vm)
             {
-                if (DataContext is MainWindowViewModel vm) vm.DeleteAlbum(selectedAlbum);
+                // Mark handled before awaiting: the event finishes routing as soon as we yield
+                e.Handled = true;
+
+                // Deleting removes the CD and its tracklist for good, so ask first
+                string name = string.IsNullOrWhiteSpace(selectedAlbum.Artist)
+                    ? selectedAlbum.Title
+                    : $"{selectedAlbum.Artist} - {selectedAlbum.Title}";
+                bool confirmed = await ConfirmDialog.ShowAsync(this, "Delete CD",
+                    $"Delete \"{name}\" and its tracklist from the library?\n\nThis can't be undone.");
+
+                if (confirmed) vm.DeleteAlbum(selectedAlbum);
+                GridAlbums.Focus();
             }
         }
 
@@ -257,44 +277,84 @@ namespace AvaloniaCDInventory
 
         private async void Window_PreviewKeyDown(object? sender, KeyEventArgs e)
         {
-            // Increased buffer to 250ms to accommodate varying USB scanner speeds
-            if ((DateTime.Now - _lastKeystroke).TotalMilliseconds > 250)
+            // Catch both Enter and Return depending on how the OS maps the scanner's termination key
+            if (e.Key == Key.Enter || e.Key == Key.Return)
             {
-                _barcodeBuffer.Clear();
-            }
-            
-            _lastKeystroke = DateTime.Now;
-
-            // Catch both Enter and Return depending on how the OS maps the scanner's termination key.
-            // Short digit runs (e.g. typing a Year into a cell) are left alone so Enter still commits the edit.
-            if ((e.Key == Key.Enter || e.Key == Key.Return) && _barcodeBuffer.Length >= MinBarcodeLength)
-            {
-                string scannedCode = _barcodeBuffer.ToString();
-                _barcodeBuffer.Clear();
-
-                // Stop the Enter from reaching other controls. This must happen before the await: the event
-                // finishes routing as soon as we yield, and an unhandled Enter makes the DataGrid select its
-                // first row and open that CD's tracklist.
-                e.Handled = true;
-                _swallowNextEnterKeyUp = true;
-
-                if (DataContext is MainWindowViewModel vm)
+                if (_heldDigits.Length >= MinBarcodeLength)
                 {
-                    await vm.ProcessBarcodeAsync(scannedCode);
+                    _releaseTimer.Stop();
+                    string scannedCode = _heldDigits.ToString();
+                    _heldDigits.Clear();
+
+                    // Stop the Enter from reaching other controls. This must happen before the await: the event
+                    // finishes routing as soon as we yield, and an unhandled Enter makes the DataGrid select its
+                    // first row and open that CD's tracklist.
+                    e.Handled = true;
+                    _swallowNextEnterKeyUp = true;
+
+                    if (DataContext is MainWindowViewModel vm)
+                    {
+                        await vm.ProcessBarcodeAsync(scannedCode);
+                    }
+                    return;
                 }
+
+                // A short digit run (e.g. a Year typed into a cell): hand the digits over first,
+                // then let Enter commit the edit as usual
+                ReleaseHeldDigits();
                 return;
             }
 
-            // Map the top-row number and numpad keys into the buffer
-            if (e.Key >= Key.D0 && e.Key <= Key.D9)
+            // Any other key (Backspace, arrows, letters...) must act after the digits typed before it,
+            // so release them now. Digit keys themselves are collected in Window_PreviewTextInput.
+            if (!IsDigitKey(e.Key) && e.Key != Key.LeftShift && e.Key != Key.RightShift)
             {
-                _barcodeBuffer.Append((char)('0' + (e.Key - Key.D0)));
-            }
-            else if (e.Key >= Key.NumPad0 && e.Key <= Key.NumPad9)
-            {
-                _barcodeBuffer.Append((char)('0' + (e.Key - Key.NumPad0)));
+                ReleaseHeldDigits();
             }
         }
+
+        private void Window_PreviewTextInput(object? sender, TextInputEventArgs e)
+        {
+            if (_replayingDigits || string.IsNullOrEmpty(e.Text)) return;
+
+            if (e.Text.All(char.IsAsciiDigit))
+            {
+                // Hold the digits back until we know whether this is a scan or typing
+                _heldDigits.Append(e.Text);
+                e.Handled = true;
+                _releaseTimer.Stop();
+                _releaseTimer.Start();
+                return;
+            }
+
+            // Non-digit text: let any held digits through first so the typed order is kept
+            ReleaseHeldDigits();
+        }
+
+        // Gives held digits back to whichever control has focus, exactly as if they had just been typed
+        private void ReleaseHeldDigits()
+        {
+            _releaseTimer.Stop();
+            if (_heldDigits.Length == 0) return;
+
+            string digits = _heldDigits.ToString();
+            _heldDigits.Clear();
+
+            if (FocusManager?.GetFocusedElement() is not Interactive target) return;
+
+            _replayingDigits = true;
+            try
+            {
+                target.RaiseEvent(new TextInputEventArgs { RoutedEvent = InputElement.TextInputEvent, Text = digits });
+            }
+            finally
+            {
+                _replayingDigits = false;
+            }
+        }
+
+        private static bool IsDigitKey(Key key) =>
+            (key >= Key.D0 && key <= Key.D9) || (key >= Key.NumPad0 && key <= Key.NumPad9);
 
         private void Window_PreviewKeyUp(object? sender, KeyEventArgs e)
         {

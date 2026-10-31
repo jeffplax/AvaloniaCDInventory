@@ -13,16 +13,20 @@ public partial class MainWindowViewModel : ObservableObject
 {
     private readonly DiscogsService _discogs = new();
 
-    // Columns the search filter is allowed to target (guards the dynamic SQL below)
-    private static readonly HashSet<string> FilterColumns = new() { "Artist", "Title", "Year", "Format", "Label", "Genre" };
-
     [ObservableProperty]
     private string _connectionString = string.Empty;
 
     [ObservableProperty]
     private string _wishlistConnectionString = string.Empty;
 
-    public ObservableCollection<Album> AllAlbums { get; } = new();
+    // Every album in the database, loaded once. Searching filters this list in memory instead of
+    // re-reading the database (including every track) on each keystroke.
+    private readonly List<Album> _library = new();
+
+    // The albums currently shown in the grid (the library, filtered by the search box).
+    // Replaced as a whole on each search so the grid refreshes once rather than once per album.
+    [ObservableProperty] private ObservableCollection<Album> _allAlbums = new();
+
     public ObservableCollection<WishListItem> WishlistItems { get; } = new();
 
     // Bound to the DataGrid's SelectedItem. The view scrolls to it whenever it changes.
@@ -43,8 +47,8 @@ public partial class MainWindowViewModel : ObservableObject
     [ObservableProperty] private string _manualEntryText = "";
 
     // Called automatically when search text or filter changes!
-    partial void OnSearchQueryChanged(string value) => LoadMasterLibrary();
-    partial void OnSelectedFilterChanged(string value) => LoadMasterLibrary();
+    partial void OnSearchQueryChanged(string value) => ApplyFilter();
+    partial void OnSelectedFilterChanged(string value) => ApplyFilter();
 
     public void InitializeConnections(string dbPath, string wishlistPath)
     {
@@ -60,12 +64,8 @@ public partial class MainWindowViewModel : ObservableObject
     {
         if (string.IsNullOrEmpty(ConnectionString)) return;
 
-        // Remember the selection so a reload doesn't throw the user back to the top of the grid
-        string? selectedUpc = SelectedAlbum?.UPC;
-
         try
         {
-            AllAlbums.Clear();
             using var conn = new SQLiteConnection(ConnectionString);
             conn.Open();
 
@@ -86,20 +86,12 @@ public partial class MainWindowViewModel : ObservableObject
                 }
             }
 
-            string sql = "SELECT * FROM albums";
-            if (!string.IsNullOrWhiteSpace(SearchQuery))
-            {
-                if (FilterColumns.Contains(SelectedFilter))
-                    sql += $" WHERE {SelectedFilter} LIKE @q";
-                else
-                    sql += " WHERE Artist LIKE @q OR Title LIKE @q OR Genre LIKE @q";
-            }
-
-            using var cmd = new SQLiteCommand(sql, conn);
-            if (!string.IsNullOrWhiteSpace(SearchQuery))
-                cmd.Parameters.AddWithValue("@q", $"%{SearchQuery}%");
-
+            // Sorted by Sort Artist (falling back to Artist), then Title, the same order the phone uses
+            using var cmd = new SQLiteCommand(@"SELECT * FROM albums
+                                                ORDER BY COALESCE(NULLIF(SortArtist, ''), Artist) COLLATE NOCASE,
+                                                         Title COLLATE NOCASE", conn);
             using var r = cmd.ExecuteReader();
+            var loaded = new List<Album>();
             while (r.Read())
             {
                 string currentUpc = r["UPC"].ToString() ?? "";
@@ -118,15 +110,54 @@ public partial class MainWindowViewModel : ObservableObject
                 if (allTracks.ContainsKey(currentUpc))
                     newAlbum.Tracks = new ObservableCollection<Track>(allTracks[currentUpc]);
 
-                AllAlbums.Add(newAlbum);
+                loaded.Add(newAlbum);
             }
-            AlbumCountText = $"{AllAlbums.Count} Albums";
-            SelectedAlbum = AllAlbums.FirstOrDefault(a => a.UPC == selectedUpc);
+
+            _library.Clear();
+            _library.AddRange(loaded);
+            ApplyFilter();
         }
         catch (Exception ex)
         {
             StatusText = $"Database Error: {ex.Message}";
         }
+    }
+
+    // Shows the albums matching the search box. Same rules as the old SQL LIKE search: a case-insensitive
+    // "contains" on the chosen column, or on Artist, Title and Genre when the filter is "All".
+    private void ApplyFilter()
+    {
+        // Remember the selection so a reload or a new search doesn't throw the user back to the top of the grid
+        string? selectedUpc = SelectedAlbum?.UPC;
+
+        string query = (SearchQuery ?? "").Trim();
+        IEnumerable<Album> matches = _library;
+
+        if (query.Length > 0)
+        {
+            Func<Album, IEnumerable<string>> fields = SelectedFilter switch
+            {
+                "Artist" => a => new[] { a.Artist },
+                "Title" => a => new[] { a.Title },
+                "Year" => a => new[] { a.Year },
+                "Format" => a => new[] { a.Format },
+                "Label" => a => new[] { a.Label },
+                "Genre" => a => new[] { a.Genre },
+                _ => a => new[] { a.Artist, a.Title, a.Genre }
+            };
+            matches = _library.Where(a => fields(a).Any(f => f.Contains(query, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        AllAlbums = new ObservableCollection<Album>(matches);
+        UpdateAlbumCount();
+        SelectedAlbum = AllAlbums.FirstOrDefault(a => a.UPC == selectedUpc);
+    }
+
+    private void UpdateAlbumCount()
+    {
+        AlbumCountText = AllAlbums.Count == _library.Count
+            ? $"{_library.Count} Albums"
+            : $"{AllAlbums.Count} of {_library.Count} Albums";
     }
 
     // =====================
@@ -309,8 +340,9 @@ public partial class MainWindowViewModel : ObservableObject
             }
             tx.Commit();
 
+            _library.Remove(album);
             AllAlbums.Remove(album);
-            AlbumCountText = $"{AllAlbums.Count} Albums";
+            UpdateAlbumCount();
             StatusText = $"Deleted: {album.Title}";
         }
         catch (Exception ex) { StatusText = $"Error deleting album: {ex.Message}"; }
@@ -437,8 +469,10 @@ public partial class MainWindowViewModel : ObservableObject
                 tx.Commit();
             }
 
+            // Shown even if it doesn't match the current search, so the new CD is always visible
+            _library.Add(album);
             AllAlbums.Add(album);
-            AlbumCountText = $"{AllAlbums.Count} Albums";
+            UpdateAlbumCount();
             SelectedAlbum = album; // the view scrolls to it, ready for any editing
             StatusText = $"✅ Saved: {album.Artist} - {album.Title}";
         }
