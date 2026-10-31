@@ -1,0 +1,45 @@
+# Builds the desktop app on GitHub's machines.
+#
+# Runs on every pull request and every push to main (and on demand from the Actions tab).
+# A pull request shows a green check or red X when it's done.
+# Each run produces a download: a self-contained Windows build that runs without .NET installed.
+# Find it at the bottom of the run's page under "Artifacts", unzip it, and run AvaloniaCDInventory.exe.
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build and publish for Windows
+        run: >
+          dotnet publish AvaloniaCDInventory.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          --output publish
+
+      - name: Upload the Windows build
+        uses: actions/upload-artifact@v7
+        with:
+          name: AvaloniaCDInventory-windows
+          path: publish/
+          retention-days: 30
