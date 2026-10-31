@@ -239,11 +239,22 @@ namespace AvaloniaCDInventory
                 Dispatcher.UIThread.Post(() => GridAlbums.ScrollIntoView(album, null), DispatcherPriority.Background);
         }
 
-        private void GridAlbums_KeyDown(object? sender, KeyEventArgs e)
+        private async void GridAlbums_KeyDown(object? sender, KeyEventArgs e)
         {
-            if (e.Key == Key.Delete && GridAlbums.SelectedItem is Album selectedAlbum)
+            if (e.Key == Key.Delete && GridAlbums.SelectedItem is Album selectedAlbum && DataContext is MainWindowViewModel vm)
             {
-                if (DataContext is MainWindowViewModel vm) vm.DeleteAlbum(selectedAlbum);
+                // Mark handled before awaiting: the event finishes routing as soon as we yield
+                e.Handled = true;
+
+                // Deleting removes the CD and its tracklist for good, so ask first
+                string name = string.IsNullOrWhiteSpace(selectedAlbum.Artist)
+                    ? selectedAlbum.Title
+                    : $"{selectedAlbum.Artist} - {selectedAlbum.Title}";
+                bool confirmed = await ConfirmDialog.ShowAsync(this, "Delete CD",
+                    $"Delete \"{name}\" and its tracklist from the library?\n\nThis can't be undone.");
+
+                if (confirmed) vm.DeleteAlbum(selectedAlbum);
+                GridAlbums.Focus();
             }
         }
 
