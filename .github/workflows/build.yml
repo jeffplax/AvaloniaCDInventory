@@ -64,6 +64,44 @@ jobs:
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Qp "/DAppVersion=${{ steps.version.outputs.number }}" installer\CDInventory.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # Install it silently on the build machine, check everything landed, then uninstall
+      - name: Test the installer
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem installer\Output\*.exe).FullName
+          $appDir = Join-Path $env:LOCALAPPDATA 'Programs\CD Inventory'
+          $exe = Join-Path $appDir 'AvaloniaCDInventory.exe'
+          $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\CD Inventory.lnk'
+          $desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'CD Inventory.lnk'
+          $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{76674D4E-3291-490C-9D4B-3B743218C642}_is1'
+          $failed = $false
+          function Check($ok, $what) {
+            if ($ok) { Write-Host "OK   $what" } else { Write-Host "FAIL $what"; $script:failed = $true }
+          }
+
+          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER','/TASKS=desktopicon' -Wait
+          Check (Test-Path $exe) "app installed to $appDir"
+          Check (Test-Path $startMenu) 'Start menu shortcut'
+          Check (Test-Path $desktop) 'desktop shortcut'
+          $entry = Get-ItemProperty $uninstallKey -ErrorAction SilentlyContinue
+          Check ($null -ne $entry) 'listed in Settings > Apps'
+          if ($entry) {
+            Check ($entry.DisplayVersion -eq '${{ steps.version.outputs.number }}') "version shown as $($entry.DisplayVersion)"
+          }
+          if (Test-Path $exe) {
+            Check ((Get-Item $exe).VersionInfo.ProductName -eq 'CD Inventory') 'product name on the .exe'
+          }
+
+          $uninstaller = Join-Path $appDir 'unins000.exe'
+          if (Test-Path $uninstaller) {
+            Start-Process $uninstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+            Start-Sleep -Seconds 3   # the uninstaller finishes cleaning up after it exits
+          }
+          Check (-not (Test-Path $exe)) 'uninstall removed the app'
+          Check (-not (Test-Path $startMenu)) 'uninstall removed the Start menu shortcut'
+          Check (-not (Test-Path $desktop)) 'uninstall removed the desktop shortcut'
+          if ($failed) { exit 1 }
+
       - name: Upload the installer
         uses: actions/upload-artifact@v7
         with:
