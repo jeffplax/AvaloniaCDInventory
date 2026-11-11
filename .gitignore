@@ -487,3 +487,6 @@ inventory.db
 wishlist.db
 *.db-shm
 *.db-wal
+# Installer build output
+installer/Output/
+/publish/

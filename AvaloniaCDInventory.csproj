@@ -5,9 +5,24 @@
     <Nullable>enable</Nullable>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-    <!-- Version tag-->
+    <!-- Version tag. The installer takes its version number from here too. -->
     <Version>2.2.0</Version>
+
+    <!-- Shown in the file's Properties > Details and in Task Manager -->
+    <Product>CD Inventory</Product>
+    <AssemblyTitle>CD Inventory</AssemblyTitle>
+    <Description>Inventory manager for a CD collection</Description>
+    <Authors>jeffplax</Authors>
+    <Copyright>Copyright © jeffplax</Copyright>
+
+    <!-- Icon on the .exe itself (Explorer, shortcuts, Start menu). Source art: Assets/AppIcon.svg -->
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Lets the window load the icon for its title bar and taskbar button -->
+    <AvaloniaResource Include="Assets\AppIcon.ico" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="11.3.12" />
