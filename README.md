@@ -26,7 +26,7 @@ Because Android strictly sandboxes application data, the phone keeps its own cop
 * **Automated Build Metadata:** Custom MSBuild targets dynamically calculate and inject the exact compilation timestamp into the app's About page.
 
 ## 🛠️ Tech Stack
-* **Language:** C# 12, XAML, Python 3
+* **Language:** C# 12, XAML, ~~Python 3~~
 * **Framework:** .NET 10
 * **UI:** Avalonia UI (Desktop) / .NET Android (Mobile)
 * **Database:** SQLite (`Microsoft.Data.Sqlite` & `System.Data.SQLite`)
