@@ -1,15 +1,22 @@
-# Builds the desktop app on GitHub's machines.
+# Builds the desktop app and its Windows installer on GitHub's machines.
 #
 # Runs on every pull request and every push to main (and on demand from the Actions tab).
 # A pull request shows a green check or red X when it's done.
-# Each run produces a download: a self-contained Windows build that runs without .NET installed.
-# Find it at the bottom of the run's page under "Artifacts", unzip it, and run AvaloniaCDInventory.exe.
+#
+# Each run has two downloads at the bottom of its page under "Artifacts":
+#   CDInventory-Setup     the installer: run it to install or upgrade the app
+#   CDInventory-portable  the plain app folder: unzip and run AvaloniaCDInventory.exe, nothing installed
+#
+# Releasing a version: set <Version> in AvaloniaCDInventory.csproj (e.g. 2.3.0), merge it to main,
+# then push a matching tag (v2.3.0). GitHub then publishes a Release on the repo's Releases page
+# with the installer attached.
 
 name: Build
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -29,6 +36,19 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      - name: Read the version number
+        id: version
+        shell: pwsh
+        run: |
+          $match = Select-String -Path AvaloniaCDInventory.csproj -Pattern '<Version>(.+)</Version>'
+          $version = $match.Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF -like 'refs/tags/v*' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            Write-Error "Tag $env:GITHUB_REF_NAME doesn't match <Version>$version</Version> in AvaloniaCDInventory.csproj"
+            exit 1
+          }
+          "number=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Version $version"
+
       - name: Build and publish for Windows
         run: >
           dotnet publish AvaloniaCDInventory.csproj
@@ -37,9 +57,47 @@ jobs:
           --self-contained true
           --output publish
 
-      - name: Upload the Windows build
+      # Inno Setup comes preinstalled on GitHub's Windows machines
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Qp "/DAppVersion=${{ steps.version.outputs.number }}" installer\CDInventory.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload the installer
         uses: actions/upload-artifact@v7
         with:
-          name: AvaloniaCDInventory-windows
+          name: CDInventory-Setup
+          path: installer/Output/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the portable build
+        uses: actions/upload-artifact@v7
+        with:
+          name: CDInventory-portable
           path: publish/
           retention-days: 30
+
+  # Only for version tags: publish a GitHub Release with the installer attached
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download the installer
+        uses: actions/download-artifact@v8
+        with:
+          name: CDInventory-Setup
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" *.exe
+          --repo "$GITHUB_REPOSITORY"
+          --title "CD Inventory ${GITHUB_REF_NAME#v}"
+          --generate-notes
